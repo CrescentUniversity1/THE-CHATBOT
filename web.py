@@ -5,78 +5,169 @@ import faiss
 import numpy as np
 import openai
 from sentence_transformers import SentenceTransformer
-from preprocess import normalize_text
-from intent_recognizer import detect_intent
-from rag_engine import load_chunks, build_index, semantic_search, ask_gpt_fallback
+from textblob import TextBlob
+from symspellpy import SymSpell
 from dotenv import load_dotenv
+from datetime import datetime
+import re
+import time
 
-# Load environment variables
+from log_utils import log_query  # <-- NEW for analytics logging
+
+# --- Load environment variables ---
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# --- Streamlit page setup ---
-st.set_page_config(page_title="🎓 CrescentBot", layout="centered")
-st.title("🎓 CrescentBot - Your University Assistant")
+# --- Streamlit Page Configuration ---
+st.set_page_config(
+    page_title="🎓 Crescent Uni Assistant",
+    layout="wide"
+)
 
-# --- Initialize session state ---
+st.markdown("<h2 style='text-align:center;'>🎓 CrescentBot - Your University Assistant</h2>", unsafe_allow_html=True)
+
+# --- Load Data ---
+@st.cache_resource
+def load_chunks():
+    with open("data/qa_dataset.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+data = load_chunks()
+questions = [item["question"] for item in data]
+
+# --- Load Embeddings and FAISS Index ---
+@st.cache_resource
+def build_index():
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = model.encode(questions, show_progress_bar=True)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(np.array(embeddings))
+    return model, index
+
+model, index = build_index()
+
+# --- Load Abbreviation Map ---
+@st.cache_data
+def load_abbreviation_map():
+    with open("data/abbreviation.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+abbreviation_map = load_abbreviation_map()
+
+# --- SymSpell for Spell Correction ---
+@st.cache_resource
+def load_symspell():
+    symspell = SymSpell(max_dictionary_edit_distance=2)
+    symspell.load_dictionary("data/frequency_dictionary_en_82_765.txt", term_index=0, count_index=1)
+    return symspell
+
+symspell = load_symspell()
+
+# --- Helpers ---
+def expand_abbreviations(text):
+    words = text.split()
+    return ' '.join([abbreviation_map.get(w.lower(), w) for w in words])
+
+def correct_spelling(text):
+    suggestions = symspell.lookup_compound(text, max_edit_distance=2)
+    return suggestions[0].term if suggestions else text
+
+def normalize_text(text):
+    text = expand_abbreviations(text)
+    text = correct_spelling(text)
+    return text.lower()
+
+def detect_intent(text):
+    greetings = ["hi", "hello", "good morning", "good afternoon"]
+    farewells = ["bye", "goodbye", "see you"]
+    if any(g in text.lower() for g in greetings):
+        return "greeting"
+    elif any(f in text.lower() for f in farewells):
+        return "farewell"
+    elif re.search(r"\b(thank(s)?|appreciate)\b", text.lower()):
+        return "gratitude"
+    return "unknown"
+
+def semantic_search(query, model, index, questions, data, top_k=1):
+    query_embedding = model.encode([query])[0]
+    D, I = index.search(np.array([query_embedding]), top_k)
+    if I[0][0] < len(questions):
+        return data[I[0][0]], D[0][0]
+    return None, float("inf")
+
+def ask_gpt_fallback(prompt, context=None):
+    try:
+        system_msg = {
+            "role": "system",
+            "content": (
+                "You are CrescentBot, a helpful and empathetic AI assistant for Crescent University. "
+                "Your job is to provide clear, friendly, and accurate answers to student queries "
+                "related to courses, departments, staff, and campus life. Be conversational and natural."
+            )
+        }
+        messages = [system_msg]
+        if context:
+            messages.append({"role": "system", "content": f"Previous context:\n{context}"})
+        messages.append({"role": "user", "content": prompt})
+
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=messages,
+            temperature=0.4,
+            max_tokens=500,
+            timeout=15
+        )
+        return response.choices[0].message["content"].strip()
+
+    except Exception:
+        return "Sorry, I'm currently unable to fetch a response from GPT-4."
+
+def type_response(response):
+    placeholder = st.empty()
+    typed = ""
+    for char in response:
+        typed += char
+        placeholder.markdown(f"<div style='font-size:18px;'>{typed}▌</div>", unsafe_allow_html=True)
+        time.sleep(0.01)
+    placeholder.markdown(f"<div style='font-size:18px;'>{typed}</div>", unsafe_allow_html=True)
+
+# --- Memory ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# --- Load model and build index ---
-@st.cache_resource
-def load_model_and_index():
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    questions, data = load_chunks()
-    index, _ = build_index(questions, model)
-    return model, index, questions, data
+# --- Chat UI ---
+with st.container():
+    for chat in st.session_state.chat_history:
+        st.markdown(f"**🧑 You:** {chat['user']}")
+        st.markdown(f"**🤖 CrescentBot:** {chat['bot']}")
 
-model, index, questions, data = load_model_and_index()
-
-# --- Chat input ---
-user_input = st.chat_input("Ask CrescentBot anything about the university...")
+user_input = st.text_input("Ask me anything about Crescent University...", key="input")
 
 if user_input:
     with st.spinner("Thinking..."):
-
-        # Step 1: Preprocess
         norm_query = normalize_text(user_input)
-
-        # Step 2: Intent detection
         intent = detect_intent(norm_query)
-
-        # Step 3: Search with FAISS
         result, score = semantic_search(norm_query, model, index, questions, data)
+        use_fallback = score > 1.2 or intent == "unknown"
 
-        # Step 4: GPT fallback if needed
-        if score > 1.2 or intent == "unknown":
-            # Pass last 3 Q&A as memory to GPT
+        if use_fallback:
             context = "\n".join([f"Q: {x['user']}\nA: {x['bot']}" for x in st.session_state.chat_history[-3:]])
             response = ask_gpt_fallback(norm_query, context=context)
         else:
             response = result["answer"]
 
-        # Step 5: Save to session memory
         st.session_state.chat_history.append({"user": user_input, "bot": response})
+        type_response(response)
 
-# --- Display conversation ---
-# Display full chat history with a typing effect
-for chat in st.session_state.chat_history[:-1]:
-    with st.chat_message("user"):
-        st.markdown(chat["user"])
-    with st.chat_message("assistant"):
-        st.markdown(chat["bot"])
-
-# Show the last message with typing animation
-if st.session_state.chat_history:
-    last = st.session_state.chat_history[-1]
-    with st.chat_message("user"):
-        st.markdown(last["user"])
-    with st.chat_message("assistant"):
-        placeholder = st.empty()
-        full_text = ""
-        for char in last["bot"]:
-            full_text += char
-            placeholder.markdown(full_text + "▌")  # blinking cursor
-            time.sleep(0.015)
-        placeholder.markdown(full_text)  # final message without cursor
-
+        # Log query
+        log_query({
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "user_input": user_input,
+            "normalized_input": norm_query,
+            "intent": intent,
+            "matched_question": result["question"] if not use_fallback else None,
+            "faiss_score": float(score),
+            "used_gpt_fallback": use_fallback,
+            "response": response,
+            "feedback": None
+        })
