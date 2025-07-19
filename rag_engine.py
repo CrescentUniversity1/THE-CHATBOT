@@ -38,23 +38,23 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 
 def ask_gpt_fallback(query, context=None):
     base_prompt = (
-        "You are CrescentBot, the university assistant for Crescent University. "
-        "Answer the student's question clearly, based only on the school's official info. "
-        "Be concise, and if the question is outside your scope, say you don’t have the answer.\n\n"
+        "You are CrescentBot, a friendly university assistant at Crescent University. "
+        "You're helpful, polite, and sound like a real human — not robotic. "
+        "Answer based ONLY on the university's official information. "
+        "If the question is unclear or not related to Crescent, say so kindly.\n\n"
     )
 
-    full_prompt = base_prompt
     if context:
-        full_prompt += f"Context:\n{context}\n\n"
+        base_prompt += f"Previous conversation:\n{context}\n\n"
 
-    full_prompt += f"Student's Question: {query}\n\nCrescentBot:"
+    full_prompt = base_prompt + f"Student's question: {query}\n\nCrescentBot:"
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",  # You can switch to "gpt-3.5-turbo"
+            model="gpt-4",
             messages=[{"role": "user", "content": full_prompt}],
-            temperature=0.4
+            temperature=0.7,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        return "Sorry, I'm currently unable to fetch a response from GPT-4."
+        return "Oops! I'm having trouble accessing my knowledge. Please try again later."
