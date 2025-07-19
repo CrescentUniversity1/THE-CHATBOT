@@ -59,8 +59,24 @@ if user_input:
         st.session_state.chat_history.append({"user": user_input, "bot": response})
 
 # --- Display conversation ---
-for chat in st.session_state.chat_history:
+# Display full chat history with a typing effect
+for chat in st.session_state.chat_history[:-1]:
     with st.chat_message("user"):
         st.markdown(chat["user"])
     with st.chat_message("assistant"):
         st.markdown(chat["bot"])
+
+# Show the last message with typing animation
+if st.session_state.chat_history:
+    last = st.session_state.chat_history[-1]
+    with st.chat_message("user"):
+        st.markdown(last["user"])
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        full_text = ""
+        for char in last["bot"]:
+            full_text += char
+            placeholder.markdown(full_text + "▌")  # blinking cursor
+            time.sleep(0.015)
+        placeholder.markdown(full_text)  # final message without cursor
+
