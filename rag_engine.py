@@ -1,6 +1,8 @@
 import faiss
 import json
 import numpy as np
+import openai
+import os
 from sentence_transformers import SentenceTransformer
 
 # Load dataset
@@ -31,3 +33,28 @@ def semantic_search(query, model, index, questions, data, top_k=1):
         })
 
     return results[0], distances[0][0]
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
+def ask_gpt_fallback(query, context=None):
+    base_prompt = (
+        "You are CrescentBot, the university assistant for Crescent University. "
+        "Answer the student's question clearly, based only on the school's official info. "
+        "Be concise, and if the question is outside your scope, say you don’t have the answer.\n\n"
+    )
+
+    full_prompt = base_prompt
+    if context:
+        full_prompt += f"Context:\n{context}\n\n"
+
+    full_prompt += f"Student's Question: {query}\n\nCrescentBot:"
+
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",  # You can switch to "gpt-3.5-turbo"
+            messages=[{"role": "user", "content": full_prompt}],
+            temperature=0.4
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return "Sorry, I'm currently unable to fetch a response from GPT-4."
