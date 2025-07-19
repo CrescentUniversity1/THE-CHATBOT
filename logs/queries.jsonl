@@ -1,0 +1,7 @@
+import json
+from datetime import datetime
+
+def log_query(data, path="logs/queries.jsonl"):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(data) + "\n")
